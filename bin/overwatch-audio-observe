@@ -30,7 +30,7 @@ sanitize_key() {
 }
 
 game_running() {
-	pgrep -if -- "$PROCESS_PATTERN" >/dev/null
+	pgrep -ix -- "$PROCESS_PATTERN" >/dev/null
 }
 
 headset_available() {

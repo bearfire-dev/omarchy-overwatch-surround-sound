@@ -10,6 +10,8 @@ ExecStart=%h/.local/bin/overwatch-audio-session watch
 ExecStopPost=-%h/.local/bin/overwatch-audio-observe service-exit %n ${SERVICE_RESULT} ${EXIT_CODE} ${EXIT_STATUS}
 Restart=always
 RestartSec=1
+RestartSteps=6
+RestartMaxDelaySec=60
 TimeoutStopSec=10
 
 [Install]

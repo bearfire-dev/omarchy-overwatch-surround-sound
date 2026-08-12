@@ -5,6 +5,7 @@ set -euo pipefail
 readonly STATE_ROOT="${XDG_STATE_HOME:-$HOME/.local/state}/overwatch-audio"
 readonly BACKUP_PARENT="$STATE_ROOT/install-backups"
 readonly ORIGINAL_BACKUP_FILE="$BACKUP_PARENT/original"
+readonly ORIGINAL_STATE_FILE="$BACKUP_PARENT/original-state"
 REMOVAL_ROOT="$STATE_ROOT/uninstall-backups/$(date +%Y%m%dT%H%M%S)-$$"
 readonly REMOVAL_ROOT
 
@@ -43,6 +44,36 @@ for destination in "${managed_paths[@]}"; do
 done
 
 systemctl --user daemon-reload
+
+original_linger=""
+original_easyeffects_enabled=""
+original_easyeffects_active=""
+if [[ -r "$ORIGINAL_STATE_FILE" ]]; then
+	while IFS='=' read -r key value; do
+		case "$key" in
+			linger) original_linger="$value" ;;
+			easyeffects_enabled) original_easyeffects_enabled="$value" ;;
+			easyeffects_active) original_easyeffects_active="$value" ;;
+		esac
+	done < "$ORIGINAL_STATE_FILE"
+fi
+
+if [[ "$original_linger" == "no" ]]; then
+	loginctl disable-linger "$USER" || true
+	printf 'Restored the linger setting to off.\n'
+fi
+
+if [[ -e "$HOME/.config/systemd/user/easyeffects.service" ]]; then
+	if [[ "$original_easyeffects_enabled" == "yes" ]]; then
+		systemctl --user enable easyeffects.service 2>/dev/null || true
+	fi
+	if [[ "$original_easyeffects_active" == "yes" ]]; then
+		systemctl --user start easyeffects.service 2>/dev/null || true
+	fi
+	if [[ "$original_easyeffects_enabled" == "yes" || "$original_easyeffects_active" == "yes" ]]; then
+		printf 'Restored the previous EasyEffects service state.\n'
+	fi
+fi
 
 printf 'Disabled the automatic audio services.\n'
 printf 'Kept the configuration and logs.\n'

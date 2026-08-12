@@ -11,6 +11,8 @@ readonly INSTALL_ID
 readonly BACKUP_ROOT="$BACKUP_PARENT/$INSTALL_ID"
 readonly LATEST_BACKUP_FILE="$BACKUP_PARENT/latest"
 readonly ORIGINAL_BACKUP_FILE="$BACKUP_PARENT/original"
+readonly ORIGINAL_STATE_FILE="$BACKUP_PARENT/original-state"
+readonly MINIMUM_EASYEFFECTS_VERSION="8.1.3"
 
 UPDATE=false
 REPLACE_CONFIG=false
@@ -63,9 +65,7 @@ if [[ "$UPDATE" == true ]]; then
 fi
 
 verify_platform() {
-	[[ -f /etc/arch-release ]] || fail "This installer supports Arch Linux only."
-	command -v omarchy >/dev/null || fail "This installer supports Omarchy only."
-	command -v pacman >/dev/null || fail "The Arch package manager is not available."
+	command -v systemctl >/dev/null || fail "This installer requires systemd user services."
 }
 
 install_prerequisites() {
@@ -84,6 +84,11 @@ install_prerequisites() {
 	)
 	local -a missing=()
 
+	if ! command -v pacman >/dev/null; then
+		printf 'No supported package manager was found. Verify these packages yourself: %s\n' "${packages[*]}"
+		return 0
+	fi
+
 	for package in "${packages[@]}"; do
 		if ! pacman -Q "$package" >/dev/null 2>&1; then
 			missing+=("$package")
@@ -92,7 +97,11 @@ install_prerequisites() {
 
 	if (( ${#missing[@]} > 0 )); then
 		printf 'Installing missing packages: %s\n' "${missing[*]}"
-		omarchy pkg add "${missing[@]}"
+		if command -v omarchy >/dev/null; then
+			omarchy pkg add "${missing[@]}"
+		else
+			sudo pacman -S --needed "${missing[@]}"
+		fi
 	fi
 }
 
@@ -103,6 +112,60 @@ verify_commands() {
 	for command_name in "${commands[@]}"; do
 		command -v "$command_name" >/dev/null || fail "A required command is missing: $command_name"
 	done
+}
+
+# The health check reads the bypass state from the EasyEffects command line.
+# EasyEffects restored that query in 8.1.3.
+verify_easyeffects() {
+	local version=""
+
+	if ! command -v easyeffects >/dev/null; then
+		if command -v flatpak >/dev/null && flatpak info com.github.wwmm.easyeffects >/dev/null 2>&1; then
+			fail "Flatpak EasyEffects is not supported. Install the native easyeffects package."
+		fi
+		fail "A required command is missing: easyeffects"
+	fi
+
+	if command -v pacman >/dev/null && pacman -Q easyeffects >/dev/null 2>&1; then
+		version="$(pacman -Q easyeffects | awk '{ print $2 }')"
+		if (( $(vercmp "$version" "$MINIMUM_EASYEFFECTS_VERSION") < 0 )); then
+			fail "EasyEffects $MINIMUM_EASYEFFECTS_VERSION or newer is required. The installed version is $version."
+		fi
+		return 0
+	fi
+
+	version="$(easyeffects --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n 1 || true)"
+	if [[ -z "$version" ]]; then
+		printf 'Warning: the EasyEffects version is unknown. Version %s or newer is required.\n' "$MINIMUM_EASYEFFECTS_VERSION" >&2
+		return 0
+	fi
+	if ! printf '%s\n%s\n' "$MINIMUM_EASYEFFECTS_VERSION" "$version" | sort -C -V; then
+		fail "EasyEffects $MINIMUM_EASYEFFECTS_VERSION or newer is required. The installed version is $version."
+	fi
+}
+
+# The first install records the states that the installer changes, so the
+# uninstall can restore them.
+record_original_state() {
+	local linger_state
+	local easyeffects_enabled=no
+	local easyeffects_active=no
+
+	if [[ -e "$ORIGINAL_STATE_FILE" ]]; then
+		return 0
+	fi
+
+	linger_state="$(loginctl show-user "$USER" -p Linger --value)"
+	if systemctl --user is-enabled --quiet easyeffects.service 2>/dev/null; then
+		easyeffects_enabled=yes
+	fi
+	if systemctl --user is-active --quiet easyeffects.service; then
+		easyeffects_active=yes
+	fi
+
+	mkdir -p "$BACKUP_PARENT"
+	printf 'linger=%s\neasyeffects_enabled=%s\neasyeffects_active=%s\n' \
+		"$linger_state" "$easyeffects_enabled" "$easyeffects_active" > "$ORIGINAL_STATE_FILE"
 }
 
 backup_path() {
@@ -162,8 +225,10 @@ trap rollback_transaction ERR
 
 verify_platform
 install_prerequisites
+verify_easyeffects
 verify_commands
 "$ROOT_DIR/tests/check.sh"
+record_original_state
 
 TRANSACTION_ACTIVE=true
 

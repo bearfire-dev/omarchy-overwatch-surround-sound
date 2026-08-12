@@ -5,10 +5,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly SCRIPT_DIR
 readonly CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/overwatch-audio/session.conf"
+readonly PROFILE_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/overwatch-audio/profiles"
 readonly STATE_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/overwatch-audio"
 readonly PREVIOUS_SINK_FILE="$STATE_DIR/previous-sink"
 readonly ACTIVE_FILE="$STATE_DIR/active"
 readonly OBSERVER="$SCRIPT_DIR/overwatch-audio-observe"
+readonly ACTIVATION_BACKOFF_START_SECONDS=5
+readonly ACTIVATION_BACKOFF_MAX_SECONDS=60
 
 if [[ ! -r "$CONFIG_FILE" ]]; then
 	printf 'Missing configuration: %s\n' "$CONFIG_FILE" >&2
@@ -17,6 +20,106 @@ fi
 
 # shellcheck source=/dev/null
 source "$CONFIG_FILE"
+
+STREAM_PATTERN="${STREAM_PATTERN:-${PROCESS_PATTERN:-}}"
+
+require_config_value() {
+	local name="$1"
+	local pattern="$2"
+
+	if [[ ! "${!name:-}" =~ $pattern ]]; then
+		printf 'Invalid configuration value for %s in %s\n' "$name" "$CONFIG_FILE" >&2
+		exit 1
+	fi
+}
+
+require_config_value HEADSET_SINK '^.+$'
+require_config_value PRESET_NAME '^.+$'
+require_config_value PROCESS_PATTERN '^.+$'
+require_config_value STREAM_PATTERN '^.+$'
+require_config_value POLL_INTERVAL '^[0-9]+(\.[0-9]+)?$'
+require_config_value HEALTH_INTERVAL '^[0-9]+$'
+
+# The base configuration is the default profile. Files under PROFILE_DIR add
+# one game each and reuse the same keys.
+declare -a PROFILE_NAMES=("default")
+declare -a PROFILE_PROCESS_PATTERNS=("$PROCESS_PATTERN")
+declare -a PROFILE_STREAM_PATTERNS=("$STREAM_PATTERN")
+declare -a PROFILE_PRESETS=("$PRESET_NAME")
+
+load_profile() {
+	local file="$1"
+	# Locals shield the base configuration from profile assignments.
+	# shellcheck disable=SC2034
+	local HEADSET_SINK="" POLL_INTERVAL="" HEALTH_INTERVAL=""
+	local PROCESS_PATTERN=""
+	local STREAM_PATTERN=""
+	local PRESET_NAME=""
+
+	# shellcheck source=/dev/null
+	source "$file"
+
+	if [[ -z "$PROCESS_PATTERN" || -z "$PRESET_NAME" ]]; then
+		printf 'Invalid profile %s: PROCESS_PATTERN and PRESET_NAME are required.\n' "$file" >&2
+		exit 1
+	fi
+
+	PROFILE_NAMES+=("$(basename -- "$file" .conf)")
+	PROFILE_PROCESS_PATTERNS+=("$PROCESS_PATTERN")
+	PROFILE_STREAM_PATTERNS+=("${STREAM_PATTERN:-$PROCESS_PATTERN}")
+	PROFILE_PRESETS+=("$PRESET_NAME")
+}
+
+for profile_file in "$PROFILE_DIR"/*.conf; do
+	if [[ -e "$profile_file" ]]; then
+		load_profile "$profile_file"
+	fi
+done
+unset profile_file
+
+select_profile() {
+	ACTIVE_PROFILE_INDEX="$1"
+	ACTIVE_PROFILE_NAME="${PROFILE_NAMES[$1]}"
+	ACTIVE_STREAM_PATTERN="${PROFILE_STREAM_PATTERNS[$1]}"
+	ACTIVE_PRESET="${PROFILE_PRESETS[$1]}"
+}
+
+select_profile 0
+
+profile_running() {
+	pgrep -ix -- "${PROFILE_PROCESS_PATTERNS[$1]}" >/dev/null
+}
+
+running_profile() {
+	local index
+
+	for (( index = 0; index < ${#PROFILE_NAMES[@]}; index++ )); do
+		if profile_running "$index"; then
+			printf '%s\n' "$index"
+			return 0
+		fi
+	done
+
+	return 1
+}
+
+profile_index_by_name() {
+	local name="$1"
+	local index
+
+	for (( index = 0; index < ${#PROFILE_NAMES[@]}; index++ )); do
+		if [[ "${PROFILE_NAMES[$index]}" == "$name" ]]; then
+			printf '%s\n' "$index"
+			return 0
+		fi
+	done
+
+	return 1
+}
+
+any_profile_running() {
+	running_profile >/dev/null
+}
 
 log() {
 	printf '%s overwatch-audio: %s\n' "$(date --iso-8601=seconds)" "$*"
@@ -52,10 +155,6 @@ sink_available() {
 	pactl list sinks short | awk -v sink="$sink" '$2 == sink { found = 1 } END { exit !found }'
 }
 
-overwatch_running() {
-	pgrep -if -- "$PROCESS_PATTERN" >/dev/null
-}
-
 move_overwatch_streams() {
 	local input
 	local inputs
@@ -66,7 +165,7 @@ move_overwatch_streams() {
 	fi
 
 	inputs="$(
-		pactl --format=json list sink-inputs | jq -r '
+		pactl --format=json list sink-inputs | jq -r --arg pattern "$ACTIVE_STREAM_PATTERN" '
 			.[]
 			| select(
 				[
@@ -74,7 +173,7 @@ move_overwatch_streams() {
 					.properties["application.process.binary"] // "",
 					.properties["media.name"] // ""
 				]
-				| any(test("overwatch"; "i"))
+				| any(test($pattern; "i"))
 			)
 			| .index
 		'
@@ -100,7 +199,7 @@ overwatch_streams_on_effects() {
 	[[ -n "$target_index" ]] || return 1
 
 	result="$(
-		pactl --format=json list sink-inputs | jq -r --argjson target "$target_index" '
+		pactl --format=json list sink-inputs | jq -r --argjson target "$target_index" --arg pattern "$ACTIVE_STREAM_PATTERN" '
 			[
 				.[]
 				| select(
@@ -109,7 +208,7 @@ overwatch_streams_on_effects() {
 						.properties["application.process.binary"] // "",
 						.properties["media.name"] // ""
 					]
-					| any(test("overwatch"; "i"))
+					| any(test($pattern; "i"))
 				)
 				| select(.sink != $target)
 			]
@@ -120,11 +219,12 @@ overwatch_streams_on_effects() {
 	[[ "$result" == "0" ]]
 }
 
-equalizer_running() {
+equalizer_loaded() {
+	# A silent pipeline reports idle or suspended, which is still healthy.
 	pw-dump | jq -e '
 		.[]
 		| select(.info.props["node.name"] == "ee_soe_equalizer")
-		| select(.info.state == "running")
+		| select(.info.state == "running" or .info.state == "idle" or .info.state == "suspended")
 	' >/dev/null
 }
 
@@ -141,20 +241,20 @@ audio_healthy() {
 	[[ "$bypass_state" == "2" ]] || return 1
 
 	loaded_preset="$(easyeffects --last-loaded-preset output 2>/dev/null || true)"
-	[[ "$loaded_preset" == "$PRESET_NAME" ]] || return 1
+	[[ "$loaded_preset" == "$ACTIVE_PRESET" ]] || return 1
 
-	equalizer_running || return 1
+	equalizer_loaded || return 1
 	overwatch_streams_on_effects
 }
 
 apply_update_after_game() {
 	while true; do
-		while overwatch_running; do
+		while any_profile_running; do
 			sleep 2
 		done
 
 		sleep 3
-		if ! overwatch_running; then
+		if ! any_profile_running; then
 			break
 		fi
 	done
@@ -172,7 +272,7 @@ configure_audio() {
 
 	pactl set-default-sink "$HEADSET_SINK"
 	wait_for_easy_effects || return 1
-	easyeffects --load-preset "$PRESET_NAME" || return 1
+	easyeffects --load-preset "$ACTIVE_PRESET" || return 1
 	easyeffects --bypass 2 || return 1
 	move_overwatch_streams
 }
@@ -182,9 +282,14 @@ activate_audio() {
 
 	mkdir -p "$STATE_DIR"
 
-	if [[ ! -s "$PREVIOUS_SINK_FILE" ]]; then
+	if [[ ! -e "$PREVIOUS_SINK_FILE" ]]; then
 		current_sink="$(pactl get-default-sink)"
-		printf '%s\n' "$current_sink" > "$PREVIOUS_SINK_FILE"
+		if [[ "$current_sink" == "easyeffects_sink" ]]; then
+			# An empty record prevents a restore to the effects sink.
+			: > "$PREVIOUS_SINK_FILE"
+		else
+			printf '%s\n' "$current_sink" > "$PREVIOUS_SINK_FILE"
+		fi
 	fi
 
 	if ! configure_audio; then
@@ -192,13 +297,13 @@ activate_audio() {
 		return 1
 	fi
 
-	touch "$ACTIVE_FILE"
-	log "enabled preset '$PRESET_NAME' on the configured headset"
+	printf '%s\n' "$ACTIVE_PROFILE_NAME" > "$ACTIVE_FILE"
+	log "enabled preset '$ACTIVE_PRESET' for profile '$ACTIVE_PROFILE_NAME'"
 }
 
 repair_audio() {
-	if configure_audio; then
-		touch "$ACTIVE_FILE"
+	if configure_audio && audio_healthy; then
+		printf '%s\n' "$ACTIVE_PROFILE_NAME" > "$ACTIVE_FILE"
 		log "repaired the active Overwatch audio path"
 		observe_pipeline "pipeline_repair" "success" "The automatic repair restored the Overwatch audio path."
 		return 0
@@ -211,6 +316,11 @@ repair_audio() {
 
 deactivate_audio() {
 	local previous_sink=""
+
+	# Leave EasyEffects alone unless this service owns an active session.
+	if [[ ! -e "$ACTIVE_FILE" && ! -e "$PREVIOUS_SINK_FILE" ]]; then
+		return 0
+	fi
 
 	if [[ -s "$PREVIOUS_SINK_FILE" ]]; then
 		previous_sink="$(<"$PREVIOUS_SINK_FILE")"
@@ -230,7 +340,11 @@ deactivate_audio() {
 
 watch_session() {
 	local next_health_check=0
+	local next_activation=0
+	local activation_backoff=0
 	local session_active=0
+	local active_name=""
+	local matched_index=""
 
 	mkdir -p "$STATE_DIR"
 	exec 9>"$STATE_DIR/watcher.lock"
@@ -239,7 +353,13 @@ watch_session() {
 		exit 0
 	fi
 
-	if overwatch_running && [[ -s "$PREVIOUS_SINK_FILE" && -e "$ACTIVE_FILE" ]]; then
+	if [[ -s "$ACTIVE_FILE" ]]; then
+		read -r active_name < "$ACTIVE_FILE"
+	fi
+	if [[ -n "$active_name" ]] \
+		&& matched_index="$(profile_index_by_name "$active_name")" \
+		&& profile_running "$matched_index"; then
+		select_profile "$matched_index"
 		session_active=1
 		if ! audio_healthy; then
 			repair_audio || true
@@ -251,24 +371,42 @@ watch_session() {
 	trap 'exit 0' INT TERM
 
 	while true; do
-		if overwatch_running; then
-			if (( ! session_active )); then
-				if activate_audio; then
-					session_active=1
-					next_health_check=$((SECONDS + HEALTH_INTERVAL))
-				else
-					observe_pipeline "session_activation" "error" "The automatic Overwatch audio session could not start."
-				fi
-			fi
-			if (( session_active && SECONDS >= next_health_check )); then
+		if (( session_active )); then
+			if ! profile_running "$ACTIVE_PROFILE_INDEX"; then
+				deactivate_audio
+				session_active=0
+				activation_backoff=0
+				next_activation=0
+			elif (( SECONDS >= next_health_check )); then
 				if ! audio_healthy; then
 					repair_audio || true
 				fi
 				next_health_check=$((SECONDS + HEALTH_INTERVAL))
 			fi
-		elif (( session_active )); then
-			deactivate_audio
-			session_active=0
+		elif matched_index="$(running_profile)"; then
+			if (( SECONDS >= next_activation )); then
+				select_profile "$matched_index"
+				if activate_audio; then
+					session_active=1
+					activation_backoff=0
+					next_health_check=$((SECONDS + HEALTH_INTERVAL))
+				else
+					if (( activation_backoff == 0 )); then
+						activation_backoff="$ACTIVATION_BACKOFF_START_SECONDS"
+					else
+						activation_backoff=$((activation_backoff * 2))
+					fi
+					if (( activation_backoff > ACTIVATION_BACKOFF_MAX_SECONDS )); then
+						activation_backoff="$ACTIVATION_BACKOFF_MAX_SECONDS"
+					fi
+					next_activation=$((SECONDS + activation_backoff))
+					log "activation failed and will retry in ${activation_backoff}s"
+					observe_pipeline "session_activation" "error" "The automatic game audio session could not start."
+				fi
+			fi
+		else
+			activation_backoff=0
+			next_activation=0
 		fi
 
 		sleep "$POLL_INTERVAL"
@@ -276,15 +414,22 @@ watch_session() {
 }
 
 show_status() {
-	printf 'Game: %s\n' "$(overwatch_running && printf running || printf stopped)"
+	local matched_index=""
+
+	if matched_index="$(running_profile)"; then
+		select_profile "$matched_index"
+	fi
+
+	printf 'Game: %s\n' "$([[ -n "$matched_index" ]] && printf running || printf stopped)"
 	printf 'Headset: %s\n' "$(headset_available && printf available || printf unavailable)"
 	printf 'EasyEffects: %s\n' "$(easy_effects_ready && printf ready || printf stopped)"
 	printf 'Effects: %s\n' "$([[ -e "$ACTIVE_FILE" ]] && printf active || printf bypassed)"
-	if overwatch_running; then
+	if [[ -n "$matched_index" ]]; then
+		printf 'Profile: %s\n' "$ACTIVE_PROFILE_NAME"
 		printf 'Pipeline: %s\n' "$(audio_healthy && printf healthy || printf needs-repair)"
 	fi
 	printf 'Default sink: %s\n' "$(pactl get-default-sink)"
-	printf 'Preset: %s\n' "$PRESET_NAME"
+	printf 'Preset: %s\n' "$ACTIVE_PRESET"
 }
 
 enable_services() {
@@ -306,6 +451,9 @@ case "${1:-watch}" in
 		watch_session
 		;;
 	on)
+		if matched_index="$(running_profile)"; then
+			select_profile "$matched_index"
+		fi
 		activate_audio
 		;;
 	off)
@@ -315,6 +463,9 @@ case "${1:-watch}" in
 		show_status
 		;;
 	health)
+		if matched_index="$(running_profile)"; then
+			select_profile "$matched_index"
+		fi
 		audio_healthy
 		;;
 	apply-update-after-game)
