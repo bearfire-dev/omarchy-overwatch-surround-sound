@@ -187,7 +187,10 @@ if [[ "$(loginctl show-user "$USER" -p Linger --value)" != "yes" ]]; then
 	loginctl enable-linger "$USER"
 fi
 
-if "$HOME/.local/bin/overwatch-audio-session" status | grep '^Game: running$' >/dev/null; then
+if (( ${#CHANGED_TARGETS[@]} == 0 )); then
+	systemctl --user start easyeffects.service overwatch-audio-session.service
+	printf 'The installed files are already current.\n'
+elif "$HOME/.local/bin/overwatch-audio-session" status | grep '^Game: running$' >/dev/null; then
 	if systemctl --user is-active --quiet easyeffects.service overwatch-audio-session.service; then
 		if ! systemctl --user is-active --quiet overwatch-audio-apply-update.service; then
 			systemd-run --user \
