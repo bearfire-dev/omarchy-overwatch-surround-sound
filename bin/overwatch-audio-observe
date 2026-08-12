@@ -1,0 +1,341 @@
+#!/bin/bash
+
+set -euo pipefail
+umask 077
+
+readonly CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/overwatch-audio/session.conf"
+readonly STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/overwatch-audio"
+readonly LOG_DIR="$STATE_DIR/logs"
+readonly LOG_FILE="$LOG_DIR/events.jsonl"
+readonly ARCHIVE_FILE="$LOG_DIR/events.1.jsonl"
+readonly LOCK_FILE="$LOG_DIR/write.lock"
+readonly ROTATION_COUNTER_FILE="$LOG_DIR/rotation-counter"
+readonly MAX_FILE_BYTES=$((24 * 1024 * 1024))
+readonly ROTATION_CHECK_EVERY=32
+readonly NOTIFICATION_COOLDOWN=300
+readonly ERROR_LOG_COOLDOWN=60
+readonly EVENT_VERSION="1"
+
+HEADSET_SINK="alsa_output.usb-Logitech_PRO_X_Wireless_Gaming_Headset-00.analog-stereo"
+PROCESS_PATTERN="Overwatch\\.exe"
+if [[ -r "$CONFIG_FILE" ]]; then
+	# shellcheck source=/dev/null
+	source "$CONFIG_FILE"
+fi
+
+mkdir -p "$LOG_DIR"
+
+sanitize_key() {
+	printf '%s' "$1" | tr -cs '[:alnum:]._-' '_'
+}
+
+game_running() {
+	pgrep -if -- "$PROCESS_PATTERN" >/dev/null
+}
+
+headset_available() {
+	pactl list sinks short 2>/dev/null | awk -v sink="$HEADSET_SINK" '$2 == sink { found = 1 } END { exit !found }'
+}
+
+rotate_eventually() {
+	local count=0
+	local size=0
+
+	if [[ -r "$ROTATION_COUNTER_FILE" ]]; then
+		read -r count < "$ROTATION_COUNTER_FILE" || count=0
+	fi
+	if [[ ! "$count" =~ ^[0-9]+$ ]]; then
+		count=0
+	fi
+
+	count=$((count + 1))
+	if (( count < ROTATION_CHECK_EVERY )); then
+		printf '%s\n' "$count" > "$ROTATION_COUNTER_FILE"
+		return
+	fi
+
+	printf '0\n' > "$ROTATION_COUNTER_FILE"
+	if [[ -f "$LOG_FILE" ]]; then
+		size="$(stat -c %s "$LOG_FILE")"
+	fi
+	if (( size >= MAX_FILE_BYTES )); then
+		mv -f "$LOG_FILE" "$ARCHIVE_FILE"
+	fi
+}
+
+append_event() {
+	local event_json="$1"
+
+	exec 9>"$LOCK_FILE"
+	flock 9
+	rotate_eventually
+	printf '%s\n' "$event_json" >> "$LOG_FILE"
+}
+
+send_notification() {
+	local key
+	local now
+	local previous=0
+	local title="$2"
+	local body="$3"
+	local cooldown_file
+
+	key="$(sanitize_key "$1")"
+	cooldown_file="$LOG_DIR/notification-$key"
+	now="$(date +%s)"
+	if [[ -r "$cooldown_file" ]]; then
+		read -r previous < "$cooldown_file" || previous=0
+	fi
+	if [[ ! "$previous" =~ ^[0-9]+$ ]]; then
+		previous=0
+	fi
+	if (( now - previous < NOTIFICATION_COOLDOWN )); then
+		return 1
+	fi
+
+	DBUS_SESSION_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/bus" \
+		gdbus call --session \
+		--dest org.freedesktop.Notifications \
+		--object-path /org/freedesktop/Notifications \
+		--method org.freedesktop.Notifications.Notify \
+		"Overwatch Audio" 0 "audio-headset" "$title" "$body" \
+		"[]" "{'urgency': <byte 2>, 'category': <'device.error'>}" 12000 >/dev/null
+	printf '%s\n' "$now" > "$cooldown_file"
+}
+
+recent_error_was_logged() {
+	local key
+	local now
+	local previous=0
+	local cooldown_file
+
+	key="$(sanitize_key "$1")"
+	cooldown_file="$LOG_DIR/error-$key"
+	now="$(date +%s)"
+	if [[ -r "$cooldown_file" ]]; then
+		read -r previous < "$cooldown_file" || previous=0
+	fi
+	if [[ ! "$previous" =~ ^[0-9]+$ ]]; then
+		previous=0
+	fi
+	if (( now - previous < ERROR_LOG_COOLDOWN )); then
+		return 0
+	fi
+
+	printf '%s\n' "$now" > "$cooldown_file"
+	return 1
+}
+
+common_audio_json() {
+	local default_sink="unavailable"
+	local game_state=false
+	local headset_state=false
+
+	default_sink="$(pactl get-default-sink 2>/dev/null || printf unavailable)"
+	if game_running; then
+		game_state=true
+	fi
+	if headset_available; then
+		headset_state=true
+	fi
+
+	jq -cn \
+		--arg default_sink "$default_sink" \
+		--argjson game_running "$game_state" \
+		--argjson headset_available "$headset_state" \
+		'{game_running: $game_running, headset_available: $headset_available, default_sink: $default_sink}'
+}
+
+service_exit() {
+	local unit="${1:-unknown.service}"
+	local service_result="${2:-unknown}"
+	local exit_code="${3:-unknown}"
+	local exit_status="${4:-unknown}"
+	local event_json
+	local journal_tail
+	local notification_sent=false
+	local restart_count="unknown"
+	local timestamp
+	local operation_id
+	local audio_json
+
+	if [[ "$service_result" == "success" ]]; then
+		exit 0
+	fi
+
+	timestamp="$(date --iso-8601=seconds)"
+	operation_id="$(cat /proc/sys/kernel/random/uuid)"
+	audio_json="$(common_audio_json)"
+	restart_count="$(systemctl --user show "$unit" -p NRestarts --value 2>/dev/null || printf unknown)"
+	journal_tail="$(journalctl --user -u "$unit" -n 25 --no-pager -o short-iso 2>/dev/null | tail -c 16384 || true)"
+
+	if send_notification "$unit" \
+		"Overwatch audio service crashed" \
+		"$unit failed with $service_result. Systemd is restarting it automatically."; then
+		notification_sent=true
+	fi
+
+	event_json="$(
+		jq -cn \
+			--arg timestamp "$timestamp" \
+			--arg operation_id "$operation_id" \
+			--arg unit "$unit" \
+			--arg version "$EVENT_VERSION" \
+			--arg service_result "$service_result" \
+			--arg exit_code "$exit_code" \
+			--arg exit_status "$exit_status" \
+			--arg restart_count "$restart_count" \
+			--arg journal_tail "$journal_tail" \
+			--argjson notification_sent "$notification_sent" \
+			--argjson audio "$audio_json" \
+			'{
+				timestamp: $timestamp,
+				operation_id: $operation_id,
+				event: "audio.service.exit",
+				service: $unit,
+				version: $version,
+				outcome: "error",
+				audio: $audio,
+				systemd: {
+					service_result: $service_result,
+					exit_code: $exit_code,
+					exit_status: $exit_status,
+					restart_count: $restart_count
+				},
+				error: {
+					type: "ServiceExit",
+					code: $service_result,
+					message: ($unit + " exited with " + $exit_code + "/" + $exit_status),
+					retriable: true
+				},
+				recovery: {action: "systemd_restart", automatic: true},
+				notification: {sent: $notification_sent, cooldown_seconds: 300},
+				diagnostics: {journal_tail: $journal_tail}
+			}'
+	)"
+	append_event "$event_json"
+}
+
+pipeline_event() {
+	local operation="${1:-unknown}"
+	local outcome="${2:-error}"
+	local message="${3:-No details available}"
+	local event_json
+	local notification_sent=false
+	local timestamp
+	local operation_id
+	local audio_json
+
+	if [[ "$outcome" == "error" ]] && recent_error_was_logged "$operation"; then
+		exit 0
+	fi
+
+	timestamp="$(date --iso-8601=seconds)"
+	operation_id="$(cat /proc/sys/kernel/random/uuid)"
+	audio_json="$(common_audio_json)"
+
+	if [[ "$outcome" == "error" ]] && send_notification "$operation" \
+		"Overwatch audio needs attention" \
+		"$message Automatic recovery will continue."; then
+		notification_sent=true
+	fi
+
+	event_json="$(
+		jq -cn \
+			--arg timestamp "$timestamp" \
+			--arg operation_id "$operation_id" \
+			--arg operation "$operation" \
+			--arg outcome "$outcome" \
+			--arg message "$message" \
+			--arg version "$EVENT_VERSION" \
+			--argjson notification_sent "$notification_sent" \
+			--argjson audio "$audio_json" \
+			'{
+				timestamp: $timestamp,
+				operation_id: $operation_id,
+				event: "audio.pipeline.recovery",
+				service: "overwatch-audio-session",
+				version: $version,
+				outcome: $outcome,
+				operation: $operation,
+				audio: $audio,
+				error: (if $outcome == "error" then {
+					type: "PipelineRecoveryError",
+					code: $operation,
+					message: $message,
+					retriable: true
+				} else null end),
+				recovery: {action: $operation, automatic: true},
+				notification: {sent: $notification_sent, cooldown_seconds: 300}
+			}'
+	)"
+	append_event "$event_json"
+}
+
+test_alert() {
+	local event_json
+	local timestamp
+	local operation_id
+	local audio_json
+
+	timestamp="$(date --iso-8601=seconds)"
+	operation_id="$(cat /proc/sys/kernel/random/uuid)"
+	audio_json="$(common_audio_json)"
+
+	DBUS_SESSION_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/bus" \
+		gdbus call --session \
+		--dest org.freedesktop.Notifications \
+		--object-path /org/freedesktop/Notifications \
+		--method org.freedesktop.Notifications.Notify \
+		"Overwatch Audio" 0 "audio-headset" "Overwatch audio monitoring is active" \
+		"Crash logs, automatic recovery, and notifications are ready." \
+		"[]" "{'urgency': <byte 1>, 'category': <'device.added'>}" 8000 >/dev/null
+
+	event_json="$(
+		jq -cn \
+			--arg timestamp "$timestamp" \
+			--arg operation_id "$operation_id" \
+			--arg version "$EVENT_VERSION" \
+			--argjson audio "$audio_json" \
+			'{timestamp: $timestamp, operation_id: $operation_id, event: "audio.observability.test", service: "overwatch-audio-observe", version: $version, outcome: "success", audio: $audio, notification: {sent: true}}'
+	)"
+	append_event "$event_json"
+}
+
+show_status() {
+	local active_size=0
+	local archive_size=0
+
+	if [[ -f "$LOG_FILE" ]]; then
+		active_size="$(stat -c %s "$LOG_FILE")"
+	fi
+	if [[ -f "$ARCHIVE_FILE" ]]; then
+		archive_size="$(stat -c %s "$ARCHIVE_FILE")"
+	fi
+
+	printf 'Active log: %s (%s bytes)\n' "$LOG_FILE" "$active_size"
+	printf 'Archive log: %s (%s bytes)\n' "$ARCHIVE_FILE" "$archive_size"
+	printf 'Total: %s bytes\n' "$((active_size + archive_size))"
+	printf 'Target limit: approximately 48 MiB\n'
+}
+
+case "${1:-status}" in
+	service-exit)
+		shift
+		service_exit "$@"
+		;;
+	pipeline)
+		shift
+		pipeline_event "$@"
+		;;
+	test)
+		test_alert
+		;;
+	status)
+		show_status
+		;;
+	*)
+		printf 'Usage: %s {service-exit|pipeline|test|status}\n' "${0##*/}" >&2
+		exit 2
+		;;
+esac

@@ -1,0 +1,18 @@
+[Unit]
+Description=EasyEffects audio processor
+After=pipewire.service pipewire-pulse.service
+Requires=pipewire.service pipewire-pulse.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+Environment=QT_QPA_PLATFORM=offscreen
+ExecStart=/usr/bin/easyeffects --service-mode
+ExecStop=/usr/bin/easyeffects --quit
+ExecStopPost=-%h/.local/bin/overwatch-audio-observe service-exit %n ${SERVICE_RESULT} ${EXIT_CODE} ${EXIT_STATUS}
+Restart=always
+RestartSec=1
+TimeoutStopSec=10
+
+[Install]
+WantedBy=default.target

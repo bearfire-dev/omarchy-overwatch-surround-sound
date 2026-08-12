@@ -1,0 +1,16 @@
+[Unit]
+Description=Automatic Overwatch audio session
+After=easyeffects.service
+Requires=easyeffects.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/overwatch-audio-session watch
+ExecStopPost=-%h/.local/bin/overwatch-audio-observe service-exit %n ${SERVICE_RESULT} ${EXIT_CODE} ${EXIT_STATUS}
+Restart=always
+RestartSec=1
+TimeoutStopSec=10
+
+[Install]
+WantedBy=default.target

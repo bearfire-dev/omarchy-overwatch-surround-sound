@@ -1,0 +1,333 @@
+#!/bin/bash
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR
+readonly CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/overwatch-audio/session.conf"
+readonly STATE_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/overwatch-audio"
+readonly PREVIOUS_SINK_FILE="$STATE_DIR/previous-sink"
+readonly ACTIVE_FILE="$STATE_DIR/active"
+readonly OBSERVER="$SCRIPT_DIR/overwatch-audio-observe"
+
+if [[ ! -r "$CONFIG_FILE" ]]; then
+	printf 'Missing configuration: %s\n' "$CONFIG_FILE" >&2
+	exit 1
+fi
+
+# shellcheck source=/dev/null
+source "$CONFIG_FILE"
+
+log() {
+	printf '%s overwatch-audio: %s\n' "$(date --iso-8601=seconds)" "$*"
+}
+
+observe_pipeline() {
+	"$OBSERVER" pipeline "$@" || true
+}
+
+easy_effects_ready() {
+	[[ -S "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/EasyEffectsServer" ]]
+}
+
+wait_for_easy_effects() {
+	for _ in {1..50}; do
+		if easy_effects_ready; then
+			return 0
+		fi
+		sleep 0.1
+	done
+
+	log "EasyEffects did not become ready"
+	return 1
+}
+
+headset_available() {
+	pactl list sinks short | awk -v sink="$HEADSET_SINK" '$2 == sink { found = 1 } END { exit !found }'
+}
+
+sink_available() {
+	local sink="$1"
+
+	pactl list sinks short | awk -v sink="$sink" '$2 == sink { found = 1 } END { exit !found }'
+}
+
+overwatch_running() {
+	pgrep -if -- "$PROCESS_PATTERN" >/dev/null
+}
+
+move_overwatch_streams() {
+	local input
+	local inputs
+	local target_sink="easyeffects_sink"
+
+	if ! sink_available "$target_sink"; then
+		return 0
+	fi
+
+	inputs="$(
+		pactl --format=json list sink-inputs | jq -r '
+			.[]
+			| select(
+				[
+					.properties["application.name"] // "",
+					.properties["application.process.binary"] // "",
+					.properties["media.name"] // ""
+				]
+				| any(test("overwatch"; "i"))
+			)
+			| .index
+		'
+	)"
+
+	while IFS= read -r input; do
+		[[ -n "$input" ]] || continue
+		pactl move-sink-input "$input" "$target_sink" || true
+	done <<< "$inputs"
+}
+
+overwatch_streams_on_effects() {
+	local result
+	local target_index
+
+	target_index="$(
+		pactl --format=json list sinks | jq -r '
+			.[]
+			| select(.name == "easyeffects_sink")
+			| .index
+		' | head -n 1
+	)"
+	[[ -n "$target_index" ]] || return 1
+
+	result="$(
+		pactl --format=json list sink-inputs | jq -r --argjson target "$target_index" '
+			[
+				.[]
+				| select(
+					[
+						.properties["application.name"] // "",
+						.properties["application.process.binary"] // "",
+						.properties["media.name"] // ""
+					]
+					| any(test("overwatch"; "i"))
+				)
+				| select(.sink != $target)
+			]
+			| length
+		'
+	)"
+
+	[[ "$result" == "0" ]]
+}
+
+equalizer_running() {
+	pw-dump | jq -e '
+		.[]
+		| select(.info.props["node.name"] == "ee_soe_equalizer")
+		| select(.info.state == "running")
+	' >/dev/null
+}
+
+audio_healthy() {
+	local bypass_state
+	local loaded_preset
+
+	headset_available || return 1
+	easy_effects_ready || return 1
+	sink_available "easyeffects_sink" || return 1
+	[[ "$(pactl get-default-sink)" == "$HEADSET_SINK" ]] || return 1
+
+	bypass_state="$(easyeffects --bypass 3 2>/dev/null || true)"
+	[[ "$bypass_state" == "2" ]] || return 1
+
+	loaded_preset="$(easyeffects --last-loaded-preset output 2>/dev/null || true)"
+	[[ "$loaded_preset" == "$PRESET_NAME" ]] || return 1
+
+	equalizer_running || return 1
+	overwatch_streams_on_effects
+}
+
+apply_update_after_game() {
+	while true; do
+		while overwatch_running; do
+			sleep 2
+		done
+
+		sleep 3
+		if ! overwatch_running; then
+			break
+		fi
+	done
+
+	systemctl --user restart easyeffects.service
+	systemctl --user restart overwatch-audio-session.service
+	log "activated the deferred update"
+}
+
+configure_audio() {
+	if ! headset_available; then
+		log "The configured headset sink is not available"
+		return 1
+	fi
+
+	pactl set-default-sink "$HEADSET_SINK"
+	wait_for_easy_effects || return 1
+	easyeffects --load-preset "$PRESET_NAME" || return 1
+	easyeffects --bypass 2 || return 1
+	move_overwatch_streams
+}
+
+activate_audio() {
+	local current_sink
+
+	mkdir -p "$STATE_DIR"
+
+	if [[ ! -s "$PREVIOUS_SINK_FILE" ]]; then
+		current_sink="$(pactl get-default-sink)"
+		printf '%s\n' "$current_sink" > "$PREVIOUS_SINK_FILE"
+	fi
+
+	if ! configure_audio; then
+		deactivate_audio
+		return 1
+	fi
+
+	touch "$ACTIVE_FILE"
+	log "enabled preset '$PRESET_NAME' on the configured headset"
+}
+
+repair_audio() {
+	if configure_audio; then
+		touch "$ACTIVE_FILE"
+		log "repaired the active Overwatch audio path"
+		observe_pipeline "pipeline_repair" "success" "The automatic repair restored the Overwatch audio path."
+		return 0
+	fi
+
+	log "audio repair failed and will retry"
+	observe_pipeline "pipeline_repair" "error" "The Overwatch audio path repair failed."
+	return 1
+}
+
+deactivate_audio() {
+	local previous_sink=""
+
+	if [[ -s "$PREVIOUS_SINK_FILE" ]]; then
+		previous_sink="$(<"$PREVIOUS_SINK_FILE")"
+		if sink_available "$previous_sink"; then
+			pactl set-default-sink "$previous_sink" || true
+		fi
+	fi
+
+	if easy_effects_ready; then
+		sleep 0.2
+		easyeffects --bypass 1 || true
+	fi
+
+	rm -f "$PREVIOUS_SINK_FILE" "$ACTIVE_FILE"
+	log "bypassed effects and restored the prior output"
+}
+
+watch_session() {
+	local next_health_check=0
+	local session_active=0
+
+	mkdir -p "$STATE_DIR"
+	exec 9>"$STATE_DIR/watcher.lock"
+	if ! flock -n 9; then
+		log "another watcher is active"
+		exit 0
+	fi
+
+	if overwatch_running && [[ -s "$PREVIOUS_SINK_FILE" && -e "$ACTIVE_FILE" ]]; then
+		session_active=1
+		if ! audio_healthy; then
+			repair_audio || true
+		fi
+	else
+		deactivate_audio
+	fi
+	trap 'if (( session_active )); then deactivate_audio; fi' EXIT
+	trap 'exit 0' INT TERM
+
+	while true; do
+		if overwatch_running; then
+			if (( ! session_active )); then
+				if activate_audio; then
+					session_active=1
+					next_health_check=$((SECONDS + HEALTH_INTERVAL))
+				else
+					observe_pipeline "session_activation" "error" "The automatic Overwatch audio session could not start."
+				fi
+			fi
+			if (( session_active && SECONDS >= next_health_check )); then
+				if ! audio_healthy; then
+					repair_audio || true
+				fi
+				next_health_check=$((SECONDS + HEALTH_INTERVAL))
+			fi
+		elif (( session_active )); then
+			deactivate_audio
+			session_active=0
+		fi
+
+		sleep "$POLL_INTERVAL"
+	done
+}
+
+show_status() {
+	printf 'Game: %s\n' "$(overwatch_running && printf running || printf stopped)"
+	printf 'Headset: %s\n' "$(headset_available && printf available || printf unavailable)"
+	printf 'EasyEffects: %s\n' "$(easy_effects_ready && printf ready || printf stopped)"
+	printf 'Effects: %s\n' "$([[ -e "$ACTIVE_FILE" ]] && printf active || printf bypassed)"
+	if overwatch_running; then
+		printf 'Pipeline: %s\n' "$(audio_healthy && printf healthy || printf needs-repair)"
+	fi
+	printf 'Default sink: %s\n' "$(pactl get-default-sink)"
+	printf 'Preset: %s\n' "$PRESET_NAME"
+}
+
+enable_services() {
+	systemctl --user enable --now easyeffects.service overwatch-audio-session.service
+}
+
+rollback_services() {
+	systemctl --user stop overwatch-audio-apply-update.service 2>/dev/null || true
+	systemctl --user disable --now overwatch-audio-session.service easyeffects.service || true
+	deactivate_audio
+	if command -v easyeffects >/dev/null && easy_effects_ready; then
+		easyeffects --quit || true
+	fi
+	log "automatic audio is disabled"
+}
+
+case "${1:-watch}" in
+	watch)
+		watch_session
+		;;
+	on)
+		activate_audio
+		;;
+	off)
+		deactivate_audio
+		;;
+	status)
+		show_status
+		;;
+	health)
+		audio_healthy
+		;;
+	apply-update-after-game)
+		apply_update_after_game
+		;;
+	enable)
+		enable_services
+		;;
+	rollback)
+		rollback_services
+		;;
+	*)
+		printf 'Usage: %s {watch|on|off|status|health|enable|rollback}\n' "${0##*/}" >&2
+		exit 2
+		;;
+esac
