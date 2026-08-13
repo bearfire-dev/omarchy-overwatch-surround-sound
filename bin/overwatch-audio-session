@@ -13,6 +13,8 @@ readonly OBSERVER="$SCRIPT_DIR/overwatch-audio-observe"
 readonly ACTIVATION_BACKOFF_START_SECONDS=5
 readonly ACTIVATION_BACKOFF_MAX_SECONDS=60
 
+ACTIVATION_ERROR=""
+
 if [[ ! -r "$CONFIG_FILE" ]]; then
 	printf 'Missing configuration: %s\n' "$CONFIG_FILE" >&2
 	exit 1
@@ -133,6 +135,13 @@ easy_effects_ready() {
 	[[ -S "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/EasyEffectsServer" ]]
 }
 
+easy_effects_cli() {
+	# The CLI starts Qt before it reaches the daemon socket, and Qt aborts
+	# when no display platform is available. The offscreen platform makes
+	# every call independent of the session display.
+	env -u DISPLAY -u WAYLAND_DISPLAY QT_QPA_PLATFORM=offscreen easyeffects "$@"
+}
+
 wait_for_easy_effects() {
 	for _ in {1..50}; do
 		if easy_effects_ready; then
@@ -237,10 +246,10 @@ audio_healthy() {
 	sink_available "easyeffects_sink" || return 1
 	[[ "$(pactl get-default-sink)" == "$HEADSET_SINK" ]] || return 1
 
-	bypass_state="$(easyeffects --bypass 3 2>/dev/null || true)"
+	bypass_state="$(easy_effects_cli --bypass 3 2>/dev/null || true)"
 	[[ "$bypass_state" == "2" ]] || return 1
 
-	loaded_preset="$(easyeffects --last-loaded-preset output 2>/dev/null || true)"
+	loaded_preset="$(easy_effects_cli --last-loaded-preset output 2>/dev/null || true)"
 	[[ "$loaded_preset" == "$ACTIVE_PRESET" ]] || return 1
 
 	equalizer_loaded || return 1
@@ -264,33 +273,51 @@ apply_update_after_game() {
 	log "activated the deferred update"
 }
 
+record_previous_sink() {
+	local current_sink
+
+	mkdir -p "$STATE_DIR"
+	if [[ -e "$PREVIOUS_SINK_FILE" ]]; then
+		return 0
+	fi
+
+	current_sink="$(pactl get-default-sink)"
+	if [[ "$current_sink" == "easyeffects_sink" ]]; then
+		# An empty record prevents a restore to the effects sink.
+		: > "$PREVIOUS_SINK_FILE"
+	else
+		printf '%s\n' "$current_sink" > "$PREVIOUS_SINK_FILE"
+	fi
+}
+
 configure_audio() {
+	ACTIVATION_ERROR="the headset sink is not available"
 	if ! headset_available; then
 		log "The configured headset sink is not available"
 		return 1
 	fi
 
-	pactl set-default-sink "$HEADSET_SINK"
+	ACTIVATION_ERROR="EasyEffects did not become ready"
 	wait_for_easy_effects || return 1
-	easyeffects --load-preset "$ACTIVE_PRESET" || return 1
-	easyeffects --bypass 2 || return 1
+
+	ACTIVATION_ERROR="the preset load failed"
+	easy_effects_cli --load-preset "$ACTIVE_PRESET" || return 1
+
+	ACTIVATION_ERROR="the bypass toggle failed"
+	easy_effects_cli --bypass 2 || return 1
+
+	# The default sink changes last, after the effects are confirmed working.
+	# A failed activation then never moves the user's audio output.
+	ACTIVATION_ERROR="the default sink change failed"
+	record_previous_sink
+	pactl set-default-sink "$HEADSET_SINK" || return 1
+
+	ACTIVATION_ERROR=""
 	move_overwatch_streams
 }
 
 activate_audio() {
-	local current_sink
-
 	mkdir -p "$STATE_DIR"
-
-	if [[ ! -e "$PREVIOUS_SINK_FILE" ]]; then
-		current_sink="$(pactl get-default-sink)"
-		if [[ "$current_sink" == "easyeffects_sink" ]]; then
-			# An empty record prevents a restore to the effects sink.
-			: > "$PREVIOUS_SINK_FILE"
-		else
-			printf '%s\n' "$current_sink" > "$PREVIOUS_SINK_FILE"
-		fi
-	fi
 
 	if ! configure_audio; then
 		deactivate_audio
@@ -309,8 +336,9 @@ repair_audio() {
 		return 0
 	fi
 
-	log "audio repair failed and will retry"
-	observe_pipeline "pipeline_repair" "error" "The Overwatch audio path repair failed."
+	ACTIVATION_ERROR="${ACTIVATION_ERROR:-the health check failed after the repair}"
+	log "audio repair failed and will retry: $ACTIVATION_ERROR"
+	observe_pipeline "pipeline_repair" "error" "The Overwatch audio path repair failed: $ACTIVATION_ERROR."
 	return 1
 }
 
@@ -331,7 +359,7 @@ deactivate_audio() {
 
 	if easy_effects_ready; then
 		sleep 0.2
-		easyeffects --bypass 1 || true
+		easy_effects_cli --bypass 1 || true
 	fi
 
 	rm -f "$PREVIOUS_SINK_FILE" "$ACTIVE_FILE"
@@ -400,8 +428,8 @@ watch_session() {
 						activation_backoff="$ACTIVATION_BACKOFF_MAX_SECONDS"
 					fi
 					next_activation=$((SECONDS + activation_backoff))
-					log "activation failed and will retry in ${activation_backoff}s"
-					observe_pipeline "session_activation" "error" "The automatic game audio session could not start."
+					log "activation failed (${ACTIVATION_ERROR:-unknown cause}) and will retry in ${activation_backoff}s"
+					observe_pipeline "session_activation" "error" "The automatic game audio session could not start: ${ACTIVATION_ERROR:-unknown cause}."
 				fi
 			fi
 		else
@@ -441,7 +469,7 @@ rollback_services() {
 	systemctl --user disable --now overwatch-audio-session.service easyeffects.service || true
 	deactivate_audio
 	if command -v easyeffects >/dev/null && easy_effects_ready; then
-		easyeffects --quit || true
+		easy_effects_cli --quit || true
 	fi
 	log "automatic audio is disabled"
 }
