@@ -56,6 +56,13 @@ SYSTEMD_UNIT_PATH="$temporary_units:/usr/lib/systemd/user:/lib/systemd/user" \
 	"$temporary_units/easyeffects.service" \
 	"$temporary_units/overwatch-audio-session.service"
 
+grep -Fq 'Environment=DISABLE_RTKIT=1' "$ROOT_DIR/systemd/easyeffects.service"
+grep -Fq 'StartLimitIntervalSec=5min' "$ROOT_DIR/systemd/easyeffects.service"
+grep -Fq 'StartLimitBurst=5' "$ROOT_DIR/systemd/easyeffects.service"
+grep -Fq 'Restart=on-failure' "$ROOT_DIR/systemd/easyeffects.service"
+grep -Fq 'DISABLE_RTKIT=1 easyeffects' "$ROOT_DIR/bin/overwatch-audio-session"
+grep -Fq $'\t\trtkit' "$ROOT_DIR/install.sh"
+
 grep -Fq 'https://github.com/basecamp/omarchy' "$ROOT_DIR/README.md"
 grep -Fq 'MIT License' "$ROOT_DIR/LICENSE"
 if grep -R --line-number --fixed-strings '/home/bear' \

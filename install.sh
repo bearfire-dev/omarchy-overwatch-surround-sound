@@ -79,6 +79,7 @@ install_prerequisites() {
 		pipewire-pulse
 		libpulse
 		procps-ng
+		rtkit
 		util-linux
 		systemd
 	)

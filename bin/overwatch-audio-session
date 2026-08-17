@@ -131,15 +131,17 @@ observe_pipeline() {
 	"$OBSERVER" pipeline "$@" || true
 }
 
-easy_effects_ready() {
-	[[ -S "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/EasyEffectsServer" ]]
-}
-
 easy_effects_cli() {
 	# The CLI starts Qt before it reaches the daemon socket, and Qt aborts
-	# when no display platform is available. The offscreen platform makes
-	# every call independent of the session display.
-	env -u DISPLAY -u WAYLAND_DISPLAY QT_QPA_PLATFORM=offscreen easyeffects "$@"
+	# when no display platform is available. EasyEffects must also stay out of
+	# RTKit because its real-time CPU guard can terminate the process.
+	env -u DISPLAY -u WAYLAND_DISPLAY \
+		QT_QPA_PLATFORM=offscreen DISABLE_RTKIT=1 easyeffects "$@"
+}
+
+easy_effects_ready() {
+	systemctl --user is-active --quiet easyeffects.service \
+		&& [[ -S "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/EasyEffectsServer" ]]
 }
 
 wait_for_easy_effects() {
