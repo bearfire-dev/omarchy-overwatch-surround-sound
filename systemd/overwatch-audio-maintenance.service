@@ -1,0 +1,8 @@
+[Unit]
+Description=Refresh an old and idle PipeWire audio graph
+After=pipewire.service pipewire-pulse.service
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/overwatch-audio-maintenance
+ExecStopPost=-%h/.local/bin/overwatch-audio-observe service-exit %n ${SERVICE_RESULT} ${EXIT_CODE} ${EXIT_STATUS}

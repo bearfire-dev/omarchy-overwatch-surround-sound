@@ -18,6 +18,8 @@ The installer verifies the audio prerequisites, validates the project, backs up 
 
 The installer includes RTKit so PipeWire can use real-time scheduling. The EasyEffects service does not use RTKit. This separation prevents the kernel real-time CPU guard from terminating EasyEffects during preset processing. It does not change the preset, sample rate, or processing quality. The service permits five start attempts within five minutes. This limit prevents an unbounded crash loop.
 
+An hourly maintenance check prevents the PipeWire graph from becoming stale after long uptimes. The task refreshes a graph only after it is 24 hours old. It skips the refresh when a configured game is open. It also skips the refresh while an MPRIS player reports playback. Any playback or capture stream also blocks the refresh. The refresh does not change the preset, sample rate, or processing quality.
+
 Run `./install.sh --update` to pull and install an update. Run `./uninstall.sh` to disable the services and restore the files that the first install replaced. The uninstall also restores the linger setting and the previous EasyEffects service state.
 
 ## Profiles

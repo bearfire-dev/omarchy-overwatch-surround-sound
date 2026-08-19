@@ -1,0 +1,76 @@
+#!/bin/bash
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR
+readonly CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/overwatch-audio/session.conf"
+readonly STATE_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/overwatch-audio"
+readonly SESSION="$SCRIPT_DIR/overwatch-audio-session"
+readonly OBSERVER="$SCRIPT_DIR/overwatch-audio-observe"
+
+if [[ -r "$CONFIG_FILE" ]]; then
+	# shellcheck source=/dev/null
+	source "$CONFIG_FILE"
+fi
+
+AUDIO_GRAPH_MAX_AGE_SECONDS="${AUDIO_GRAPH_MAX_AGE_SECONDS:-86400}"
+if [[ ! "$AUDIO_GRAPH_MAX_AGE_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
+	printf 'Invalid AUDIO_GRAPH_MAX_AGE_SECONDS in %s\n' "$CONFIG_FILE" >&2
+	exit 1
+fi
+
+audio_in_use() {
+	local player_states
+	local sink_inputs
+	local source_outputs
+
+	player_states="$(playerctl --all-players status 2>/dev/null || true)"
+	if grep -Fxq 'Playing' <<< "$player_states"; then
+		return 0
+	fi
+	sink_inputs="$(pactl --format=json list sink-inputs | jq 'length')"
+	source_outputs="$(pactl --format=json list source-outputs | jq 'length')"
+	(( sink_inputs > 0 || source_outputs > 0 ))
+}
+
+game_stopped() {
+	local session_status
+
+	session_status="$("$SESSION" status 2>/dev/null)" || return 1
+	grep -Fxq 'Game: stopped' <<< "$session_status"
+}
+
+pipewire_age() {
+	local pipewire_pid
+
+	pipewire_pid="$(systemctl --user show pipewire.service -p MainPID --value)"
+	[[ "$pipewire_pid" =~ ^[1-9][0-9]*$ ]] || return 1
+	ps -o etimes= -p "$pipewire_pid" | tr -d ' '
+}
+
+refresh_audio_graph() {
+	if ! systemctl --user stop overwatch-audio-session.service easyeffects.service; then
+		systemctl --user start easyeffects.service overwatch-audio-session.service || true
+		return 1
+	fi
+	if ! systemctl --user restart pipewire.service pipewire-pulse.service; then
+		systemctl --user start easyeffects.service overwatch-audio-session.service || true
+		return 1
+	fi
+	systemctl --user start easyeffects.service overwatch-audio-session.service
+	"$OBSERVER" pipeline "idle_audio_graph_refresh" "success" \
+		"The idle maintenance task refreshed the PipeWire audio graph." || true
+}
+
+mkdir -p "$STATE_DIR"
+exec 9>"$STATE_DIR/maintenance.lock"
+flock -n 9 || exit 0
+
+age="$(pipewire_age)"
+[[ "$age" =~ ^[0-9]+$ ]] || exit 1
+(( age >= AUDIO_GRAPH_MAX_AGE_SECONDS )) || exit 0
+game_stopped || exit 0
+audio_in_use && exit 0
+
+refresh_audio_graph

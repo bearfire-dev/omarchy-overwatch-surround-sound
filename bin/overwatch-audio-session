@@ -463,12 +463,14 @@ show_status() {
 }
 
 enable_services() {
-	systemctl --user enable --now easyeffects.service overwatch-audio-session.service
+	systemctl --user enable --now \
+		easyeffects.service overwatch-audio-session.service overwatch-audio-maintenance.timer
 }
 
 rollback_services() {
 	systemctl --user stop overwatch-audio-apply-update.service 2>/dev/null || true
-	systemctl --user disable --now overwatch-audio-session.service easyeffects.service || true
+	systemctl --user disable --now \
+		overwatch-audio-maintenance.timer overwatch-audio-session.service easyeffects.service || true
 	deactivate_audio
 	if command -v easyeffects >/dev/null && easy_effects_ready; then
 		easy_effects_cli --quit || true

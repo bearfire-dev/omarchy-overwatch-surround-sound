@@ -77,6 +77,7 @@ install_prerequisites() {
 		glib2
 		pipewire
 		pipewire-pulse
+		playerctl
 		libpulse
 		procps-ng
 		rtkit
@@ -108,7 +109,7 @@ install_prerequisites() {
 
 verify_commands() {
 	local command_name
-	local -a commands=(easyeffects flock gdbus jq loginctl pactl pgrep pw-dump systemctl systemd-analyze)
+	local -a commands=(easyeffects flock gdbus jq loginctl pactl pgrep playerctl pw-dump systemctl systemd-analyze)
 
 	for command_name in "${commands[@]}"; do
 		command -v "$command_name" >/dev/null || fail "A required command is missing: $command_name"
@@ -235,8 +236,11 @@ TRANSACTION_ACTIVE=true
 
 install_target "$ROOT_DIR/bin/overwatch-audio-session" "$HOME/.local/bin/overwatch-audio-session" 0755
 install_target "$ROOT_DIR/bin/overwatch-audio-observe" "$HOME/.local/bin/overwatch-audio-observe" 0755
+install_target "$ROOT_DIR/bin/overwatch-audio-maintenance" "$HOME/.local/bin/overwatch-audio-maintenance" 0755
 install_target "$ROOT_DIR/systemd/easyeffects.service" "$HOME/.config/systemd/user/easyeffects.service" 0644
 install_target "$ROOT_DIR/systemd/overwatch-audio-session.service" "$HOME/.config/systemd/user/overwatch-audio-session.service" 0644
+install_target "$ROOT_DIR/systemd/overwatch-audio-maintenance.service" "$HOME/.config/systemd/user/overwatch-audio-maintenance.service" 0644
+install_target "$ROOT_DIR/systemd/overwatch-audio-maintenance.timer" "$HOME/.config/systemd/user/overwatch-audio-maintenance.timer" 0644
 install_target "$ROOT_DIR/presets/PRO X Overwatch Conservative.json" "$HOME/.local/share/easyeffects/output/PRO X Overwatch Conservative.json" 0644
 install_target "$ROOT_DIR/presets/PRO X Neutral Reference.json" "$HOME/.local/share/easyeffects/output/PRO X Neutral Reference.json" 0644
 
@@ -247,7 +251,8 @@ else
 fi
 
 systemctl --user daemon-reload
-systemctl --user enable easyeffects.service overwatch-audio-session.service >/dev/null
+systemctl --user enable easyeffects.service overwatch-audio-session.service overwatch-audio-maintenance.timer >/dev/null
+systemctl --user start overwatch-audio-maintenance.timer
 
 if [[ "$(loginctl show-user "$USER" -p Linger --value)" != "yes" ]]; then
 	loginctl enable-linger "$USER"
@@ -274,8 +279,8 @@ else
 	systemctl --user restart overwatch-audio-session.service
 fi
 
-systemctl --user is-enabled --quiet easyeffects.service overwatch-audio-session.service
-systemctl --user is-active --quiet easyeffects.service overwatch-audio-session.service
+systemctl --user is-enabled --quiet easyeffects.service overwatch-audio-session.service overwatch-audio-maintenance.timer
+systemctl --user is-active --quiet easyeffects.service overwatch-audio-session.service overwatch-audio-maintenance.timer
 
 if (( ${#CHANGED_TARGETS[@]} > 0 )); then
 	mkdir -p "$BACKUP_PARENT"

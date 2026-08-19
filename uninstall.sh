@@ -12,13 +12,18 @@ readonly REMOVAL_ROOT
 managed_paths=(
 	"$HOME/.local/bin/overwatch-audio-session"
 	"$HOME/.local/bin/overwatch-audio-observe"
+	"$HOME/.local/bin/overwatch-audio-maintenance"
 	"$HOME/.config/systemd/user/easyeffects.service"
 	"$HOME/.config/systemd/user/overwatch-audio-session.service"
+	"$HOME/.config/systemd/user/overwatch-audio-maintenance.service"
+	"$HOME/.config/systemd/user/overwatch-audio-maintenance.timer"
 	"$HOME/.local/share/easyeffects/output/PRO X Overwatch Conservative.json"
 	"$HOME/.local/share/easyeffects/output/PRO X Neutral Reference.json"
 )
 
 systemctl --user stop overwatch-audio-apply-update.service 2>/dev/null || true
+systemctl --user disable --now overwatch-audio-maintenance.timer 2>/dev/null || true
+systemctl --user stop overwatch-audio-maintenance.service 2>/dev/null || true
 if [[ -x "$HOME/.local/bin/overwatch-audio-session" ]]; then
 	"$HOME/.local/bin/overwatch-audio-session" rollback || true
 else
