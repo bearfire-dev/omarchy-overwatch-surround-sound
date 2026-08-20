@@ -6,6 +6,8 @@ This setup targets Overwatch on the Logitech G PRO X Wireless headset out of the
 
 The presets apply a stereo equalizer. They do not add spatial surround processing.
 
+EasyEffects processes only the game streams that the watcher moves to it. All other audio goes directly to the selected output device.
+
 ## Install
 
 ```bash

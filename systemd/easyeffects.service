@@ -9,6 +9,7 @@ StartLimitBurst=5
 Type=simple
 Environment=QT_QPA_PLATFORM=offscreen
 Environment=DISABLE_RTKIT=1
+ExecStartPre=%h/.local/bin/overwatch-audio-effects-config
 ExecStart=/usr/bin/easyeffects --service-mode
 ExecStop=/usr/bin/easyeffects --quit
 ExecStopPost=-%h/.local/bin/overwatch-audio-observe service-exit %n ${SERVICE_RESULT} ${EXIT_CODE} ${EXIT_STATUS}

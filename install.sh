@@ -237,6 +237,7 @@ TRANSACTION_ACTIVE=true
 install_target "$ROOT_DIR/bin/overwatch-audio-session" "$HOME/.local/bin/overwatch-audio-session" 0755
 install_target "$ROOT_DIR/bin/overwatch-audio-observe" "$HOME/.local/bin/overwatch-audio-observe" 0755
 install_target "$ROOT_DIR/bin/overwatch-audio-maintenance" "$HOME/.local/bin/overwatch-audio-maintenance" 0755
+install_target "$ROOT_DIR/bin/overwatch-audio-effects-config" "$HOME/.local/bin/overwatch-audio-effects-config" 0755
 install_target "$ROOT_DIR/systemd/easyeffects.service" "$HOME/.config/systemd/user/easyeffects.service" 0644
 install_target "$ROOT_DIR/systemd/overwatch-audio-session.service" "$HOME/.config/systemd/user/overwatch-audio-session.service" 0644
 install_target "$ROOT_DIR/systemd/overwatch-audio-maintenance.service" "$HOME/.config/systemd/user/overwatch-audio-maintenance.service" 0644
@@ -281,6 +282,28 @@ fi
 
 systemctl --user is-enabled --quiet easyeffects.service overwatch-audio-session.service overwatch-audio-maintenance.timer
 systemctl --user is-active --quiet easyeffects.service overwatch-audio-session.service overwatch-audio-maintenance.timer
+
+# EasyEffects captured every stream before version 0.2.4, and WirePlumber
+# saved a permanent easyeffects_sink target for each captured stream. The
+# saved targets must go so that normal audio follows the default output.
+# This runs after the service restart, because an EasyEffects process with
+# stream capture still enabled would create the targets again.
+unpin_effects_sink_targets() {
+	local state_file="${XDG_STATE_HOME:-$HOME/.local/state}/wireplumber/stream-properties"
+
+	[[ -f "$state_file" ]] || return 0
+	grep -Fq '"target":"easyeffects_sink"' "$state_file" || return 0
+	if "$HOME/.local/bin/overwatch-audio-session" status 2>/dev/null | grep -Fxq 'Game: running'; then
+		printf 'Overwatch is open. Run the installer again later to clear the saved stream targets.\n'
+		return 0
+	fi
+	systemctl --user stop wireplumber.service
+	sed -i -E 's/"target":"easyeffects_sink",[[:space:]]*//g; s/,[[:space:]]*"target":"easyeffects_sink"//g' "$state_file"
+	systemctl --user start wireplumber.service
+	printf 'Cleared the saved easyeffects_sink stream targets.\n'
+}
+
+unpin_effects_sink_targets
 
 if (( ${#CHANGED_TARGETS[@]} > 0 )); then
 	mkdir -p "$BACKUP_PARENT"

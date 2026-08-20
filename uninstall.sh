@@ -13,6 +13,7 @@ managed_paths=(
 	"$HOME/.local/bin/overwatch-audio-session"
 	"$HOME/.local/bin/overwatch-audio-observe"
 	"$HOME/.local/bin/overwatch-audio-maintenance"
+	"$HOME/.local/bin/overwatch-audio-effects-config"
 	"$HOME/.config/systemd/user/easyeffects.service"
 	"$HOME/.config/systemd/user/overwatch-audio-session.service"
 	"$HOME/.config/systemd/user/overwatch-audio-maintenance.service"
@@ -66,6 +67,14 @@ fi
 if [[ "$original_linger" == "no" ]]; then
 	loginctl disable-linger "$USER" || true
 	printf 'Restored the linger setting to off.\n'
+fi
+
+# The removal returns the EasyEffects stream capture keys to their upstream
+# defaults. This runs while EasyEffects is stopped.
+easyeffects_rc="${XDG_CONFIG_HOME:-$HOME/.config}/easyeffects/db/easyeffectsrc"
+if [[ -f "$easyeffects_rc" ]]; then
+	sed -i -E '/^processAllOutputs=false$/d; /^processAllInputs=false$/d' "$easyeffects_rc"
+	printf 'Restored the EasyEffects stream capture defaults.\n'
 fi
 
 if [[ -e "$HOME/.config/systemd/user/easyeffects.service" ]]; then

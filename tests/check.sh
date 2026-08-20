@@ -12,6 +12,7 @@ scripts=(
 	"$ROOT_DIR/bin/overwatch-audio-session"
 	"$ROOT_DIR/bin/overwatch-audio-observe"
 	"$ROOT_DIR/bin/overwatch-audio-maintenance"
+	"$ROOT_DIR/bin/overwatch-audio-effects-config"
 	"$ROOT_DIR/tests/check.sh"
 )
 
@@ -47,6 +48,7 @@ for unit in "$ROOT_DIR"/systemd/*.service "$ROOT_DIR"/systemd/*.timer; do
 		-e 's|%h/.local/bin/overwatch-audio-session|/bin/true|g' \
 		-e 's|%h/.local/bin/overwatch-audio-observe|/bin/true|g' \
 		-e 's|%h/.local/bin/overwatch-audio-maintenance|/bin/true|g' \
+		-e 's|%h/.local/bin/overwatch-audio-effects-config|/bin/true|g' \
 		"$unit" > "$temporary_units/${unit##*/}"
 done
 
@@ -68,6 +70,11 @@ grep -Fq 'DISABLE_RTKIT=1 easyeffects' "$ROOT_DIR/bin/overwatch-audio-session"
 grep -Fq $'\t\trtkit' "$ROOT_DIR/install.sh"
 grep -Fq 'audio_in_use && exit 0' "$ROOT_DIR/bin/overwatch-audio-maintenance"
 grep -Fq 'game_stopped || exit 0' "$ROOT_DIR/bin/overwatch-audio-maintenance"
+grep -Fq 'ExecStartPre=%h/.local/bin/overwatch-audio-effects-config' "$ROOT_DIR/systemd/easyeffects.service"
+grep -Fq 'processAllOutputs' "$ROOT_DIR/bin/overwatch-audio-effects-config"
+grep -Fq 'processAllInputs' "$ROOT_DIR/bin/overwatch-audio-effects-config"
+grep -Fq 'effects_output_linked' "$ROOT_DIR/bin/overwatch-audio-session"
+grep -Fq 'unpin_effects_sink_targets' "$ROOT_DIR/install.sh"
 grep -Fq "playerctl --all-players status" "$ROOT_DIR/bin/overwatch-audio-maintenance"
 grep -Fq $'\t\tplayerctl' "$ROOT_DIR/install.sh"
 grep -Fq 'AUDIO_GRAPH_MAX_AGE_SECONDS="86400"' "$ROOT_DIR/config/session.conf"

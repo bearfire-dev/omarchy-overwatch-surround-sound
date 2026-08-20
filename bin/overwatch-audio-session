@@ -239,23 +239,55 @@ equalizer_loaded() {
 	' >/dev/null
 }
 
+effects_output_linked() {
+	# The check needs audio flow through the effects sink. Without flow the
+	# links can be gone while the pipeline is still healthy.
+	pw-dump | jq -e --arg sink "$HEADSET_SINK" '
+		. as $graph
+		| ($graph[] | select(.info.props["node.name"]? == "easyeffects_sink") | .info.state) as $sink_state
+		| if $sink_state != "running" then true
+		else (
+			($graph[] | select(.info.props["node.name"]? == "ee_soe_output_level") | .id) as $effects_output
+			| ($graph[] | select(.info.props["node.name"]? == $sink) | .id) as $device
+			| [
+				$graph[]
+				| select(.type == "PipeWire:Interface:Link")
+				| select(.info["output-node-id"] == $effects_output)
+				| select(.info["input-node-id"] == $device)
+			]
+			| length > 0
+		) end
+	' >/dev/null
+}
+
 audio_healthy() {
 	local bypass_state
 	local loaded_preset
 
+	ACTIVATION_ERROR="the headset sink is not available"
 	headset_available || return 1
+	ACTIVATION_ERROR="EasyEffects is not ready"
 	easy_effects_ready || return 1
+	ACTIVATION_ERROR="the effects sink is missing"
 	sink_available "easyeffects_sink" || return 1
+	ACTIVATION_ERROR="the default sink is not the headset"
 	[[ "$(pactl get-default-sink)" == "$HEADSET_SINK" ]] || return 1
 
+	ACTIVATION_ERROR="the effects are bypassed"
 	bypass_state="$(easy_effects_cli --bypass 3 2>/dev/null || true)"
 	[[ "$bypass_state" == "2" ]] || return 1
 
+	ACTIVATION_ERROR="the loaded preset is not the profile preset"
 	loaded_preset="$(easy_effects_cli --last-loaded-preset output 2>/dev/null || true)"
 	[[ "$loaded_preset" == "$ACTIVE_PRESET" ]] || return 1
 
+	ACTIVATION_ERROR="the equalizer node is missing"
 	equalizer_loaded || return 1
-	overwatch_streams_on_effects
+	ACTIVATION_ERROR="the effects output is not connected to the headset"
+	effects_output_linked || return 1
+	ACTIVATION_ERROR="the game streams are not on the effects sink"
+	overwatch_streams_on_effects || return 1
+	ACTIVATION_ERROR=""
 }
 
 apply_update_after_game() {
