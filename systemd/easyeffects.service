@@ -9,6 +9,7 @@ StartLimitBurst=5
 Type=simple
 Environment=QT_QPA_PLATFORM=offscreen
 Environment=DISABLE_RTKIT=1
+UnsetEnvironment=DISPLAY WAYLAND_DISPLAY QT_QPA_PLATFORMTHEME GDK_BACKEND
 ExecStartPre=%h/.local/bin/overwatch-audio-effects-config
 ExecStart=/usr/bin/easyeffects --service-mode
 ExecStop=/usr/bin/easyeffects --quit

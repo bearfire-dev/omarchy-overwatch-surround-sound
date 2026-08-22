@@ -133,9 +133,11 @@ observe_pipeline() {
 
 easy_effects_cli() {
 	# The CLI starts Qt before it reaches the daemon socket, and Qt aborts
-	# when no display platform is available. EasyEffects must also stay out of
-	# RTKit because its real-time CPU guard can terminate the process.
-	env -u DISPLAY -u WAYLAND_DISPLAY \
+	# when no display platform is available. The gtk3 platform theme opens a
+	# display on its own, so the theme must go as well. EasyEffects must also
+	# stay out of RTKit because its real-time CPU guard can terminate the
+	# process.
+	env -u DISPLAY -u WAYLAND_DISPLAY -u QT_QPA_PLATFORMTHEME -u GDK_BACKEND \
 		QT_QPA_PLATFORM=offscreen DISABLE_RTKIT=1 easyeffects "$@"
 }
 
@@ -197,7 +199,9 @@ move_overwatch_streams() {
 }
 
 overwatch_streams_on_effects() {
-	local result
+	local counts
+	local matched
+	local off_target
 	local target_index
 
 	target_index="$(
@@ -207,9 +211,12 @@ overwatch_streams_on_effects() {
 			| .index
 		' | head -n 1
 	)"
-	[[ -n "$target_index" ]] || return 1
+	if [[ -z "$target_index" ]]; then
+		ACTIVATION_ERROR="the effects sink is missing"
+		return 1
+	fi
 
-	result="$(
+	counts="$(
 		pactl --format=json list sink-inputs | jq -r --argjson target "$target_index" --arg pattern "$ACTIVE_STREAM_PATTERN" '
 			[
 				.[]
@@ -221,13 +228,20 @@ overwatch_streams_on_effects() {
 					]
 					| any(test($pattern; "i"))
 				)
-				| select(.sink != $target)
 			]
-			| length
+			| "\(length) \(map(select(.sink != $target)) | length)"
 		'
 	)"
+	read -r matched off_target <<< "$counts"
 
-	[[ "$result" == "0" ]]
+	if (( matched == 0 )); then
+		ACTIVATION_ERROR="no game streams match the stream pattern"
+		return 1
+	fi
+	if (( off_target > 0 )); then
+		ACTIVATION_ERROR="the game streams are not on the effects sink"
+		return 1
+	fi
 }
 
 equalizer_loaded() {
@@ -281,12 +295,13 @@ audio_healthy() {
 	loaded_preset="$(easy_effects_cli --last-loaded-preset output 2>/dev/null || true)"
 	[[ "$loaded_preset" == "$ACTIVE_PRESET" ]] || return 1
 
+	# The stream check runs first. EasyEffects builds the equalizer and the
+	# output links only while streams feed the effects sink.
+	overwatch_streams_on_effects || return 1
 	ACTIVATION_ERROR="the equalizer node is missing"
 	equalizer_loaded || return 1
 	ACTIVATION_ERROR="the effects output is not connected to the headset"
 	effects_output_linked || return 1
-	ACTIVATION_ERROR="the game streams are not on the effects sink"
-	overwatch_streams_on_effects || return 1
 	ACTIVATION_ERROR=""
 }
 
@@ -530,7 +545,10 @@ case "${1:-watch}" in
 		if matched_index="$(running_profile)"; then
 			select_profile "$matched_index"
 		fi
-		audio_healthy
+		if ! audio_healthy; then
+			printf 'Unhealthy: %s\n' "${ACTIVATION_ERROR:-unknown cause}" >&2
+			exit 1
+		fi
 		;;
 	apply-update-after-game)
 		apply_update_after_game

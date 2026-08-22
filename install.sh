@@ -289,17 +289,24 @@ systemctl --user is-active --quiet easyeffects.service overwatch-audio-session.s
 # This runs after the service restart, because an EasyEffects process with
 # stream capture still enabled would create the targets again.
 unpin_effects_sink_targets() {
+	local game_status
 	local state_file="${XDG_STATE_HOME:-$HOME/.local/state}/wireplumber/stream-properties"
 
 	[[ -f "$state_file" ]] || return 0
 	grep -Fq '"target":"easyeffects_sink"' "$state_file" || return 0
-	if "$HOME/.local/bin/overwatch-audio-session" status 2>/dev/null | grep -Fxq 'Game: running'; then
+	# The full capture avoids a broken pipe under pipefail, and an empty
+	# result counts as a running game. A WirePlumber restart during play is
+	# worse than a delayed cleanup.
+	game_status="$("$HOME/.local/bin/overwatch-audio-session" status 2>/dev/null || true)"
+	if [[ -z "$game_status" ]] || grep -Fxq 'Game: running' <<< "$game_status"; then
 		printf 'Overwatch is open. Run the installer again later to clear the saved stream targets.\n'
 		return 0
 	fi
 	systemctl --user stop wireplumber.service
 	sed -i -E 's/"target":"easyeffects_sink",[[:space:]]*//g; s/,[[:space:]]*"target":"easyeffects_sink"//g' "$state_file"
 	systemctl --user start wireplumber.service
+	# The graph needs a moment to enumerate devices again.
+	sleep 2
 	printf 'Cleared the saved easyeffects_sink stream targets.\n'
 }
 
