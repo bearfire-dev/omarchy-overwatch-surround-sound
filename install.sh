@@ -109,7 +109,7 @@ install_prerequisites() {
 
 verify_commands() {
 	local command_name
-	local -a commands=(easyeffects flock gdbus jq loginctl pactl pgrep playerctl pw-dump systemctl systemd-analyze)
+	local -a commands=(easyeffects flock gdbus jq loginctl pactl pgrep playerctl pw-config pw-dump systemctl systemd-analyze)
 
 	for command_name in "${commands[@]}"; do
 		command -v "$command_name" >/dev/null || fail "A required command is missing: $command_name"
@@ -238,6 +238,7 @@ install_target "$ROOT_DIR/bin/overwatch-audio-session" "$HOME/.local/bin/overwat
 install_target "$ROOT_DIR/bin/overwatch-audio-observe" "$HOME/.local/bin/overwatch-audio-observe" 0755
 install_target "$ROOT_DIR/bin/overwatch-audio-maintenance" "$HOME/.local/bin/overwatch-audio-maintenance" 0755
 install_target "$ROOT_DIR/bin/overwatch-audio-effects-config" "$HOME/.local/bin/overwatch-audio-effects-config" 0755
+install_target "$ROOT_DIR/config/pipewire/pipewire-pulse.conf.d/overwatch-audio-routing.conf" "$HOME/.config/pipewire/pipewire-pulse.conf.d/overwatch-audio-routing.conf" 0644
 install_target "$ROOT_DIR/systemd/easyeffects.service" "$HOME/.config/systemd/user/easyeffects.service" 0644
 install_target "$ROOT_DIR/systemd/overwatch-audio-session.service" "$HOME/.config/systemd/user/overwatch-audio-session.service" 0644
 install_target "$ROOT_DIR/systemd/overwatch-audio-maintenance.service" "$HOME/.config/systemd/user/overwatch-audio-maintenance.service" 0644
@@ -276,6 +277,7 @@ elif "$HOME/.local/bin/overwatch-audio-session" status | grep '^Game: running$' 
 		systemctl --user start easyeffects.service overwatch-audio-session.service
 	fi
 else
+	systemctl --user restart pipewire-pulse.service
 	systemctl --user restart easyeffects.service
 	systemctl --user restart overwatch-audio-session.service
 fi

@@ -169,16 +169,27 @@ sink_available() {
 }
 
 move_overwatch_streams() {
+	local dont_reconnect
+	local failed=false
 	local input
 	local inputs
+	local target_index
 	local target_sink="easyeffects_sink"
 
 	if ! sink_available "$target_sink"; then
 		return 0
 	fi
+	target_index="$(
+		pactl --format=json list sinks | jq -r --arg sink "$target_sink" '
+			.[]
+			| select(.name == $sink)
+			| .index
+		' | head -n 1
+	)"
+	[[ -n "$target_index" ]] || return 0
 
 	inputs="$(
-		pactl --format=json list sink-inputs | jq -r --arg pattern "$ACTIVE_STREAM_PATTERN" '
+		pactl --format=json list sink-inputs | jq -r --argjson target "$target_index" --arg pattern "$ACTIVE_STREAM_PATTERN" '
 			.[]
 			| select(
 				[
@@ -188,14 +199,26 @@ move_overwatch_streams() {
 				]
 				| any(test($pattern; "i"))
 			)
-			| .index
+			| select(.sink != $target)
+			| [.index, (.properties["node.dont-reconnect"] // "false")]
+			| @tsv
 		'
 	)"
 
-	while IFS= read -r input; do
+	while IFS=$'\t' read -r input dont_reconnect; do
 		[[ -n "$input" ]] || continue
-		pactl move-sink-input "$input" "$target_sink" || true
+		if [[ "$dont_reconnect" == "true" ]]; then
+			ACTIVATION_ERROR="a game stream is pinned to another sink because creation-time routing is not active"
+			failed=true
+			continue
+		fi
+		if ! pactl move-sink-input "$input" "$target_sink"; then
+			ACTIVATION_ERROR="a game stream could not move to the effects sink"
+			failed=true
+		fi
 	done <<< "$inputs"
+
+	[[ "$failed" == false ]]
 }
 
 overwatch_streams_on_effects() {
@@ -317,6 +340,7 @@ apply_update_after_game() {
 		fi
 	done
 
+	systemctl --user restart pipewire-pulse.service
 	systemctl --user restart easyeffects.service
 	systemctl --user restart overwatch-audio-session.service
 	log "activated the deferred update"

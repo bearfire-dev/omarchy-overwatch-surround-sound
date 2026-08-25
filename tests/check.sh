@@ -42,6 +42,17 @@ done
 temporary_units="$(mktemp -d)"
 trap 'rm -rf -- "$temporary_units"' EXIT
 
+temporary_config_home="$temporary_units/config"
+mkdir -p "$temporary_config_home/pipewire/pipewire-pulse.conf.d"
+cp -- "$ROOT_DIR/config/pipewire/pipewire-pulse.conf.d/overwatch-audio-routing.conf" \
+	"$temporary_config_home/pipewire/pipewire-pulse.conf.d/"
+merged_stream_rules="$(
+	XDG_CONFIG_HOME="$temporary_config_home" \
+		pw-config -n pipewire-pulse.conf merge stream.rules
+)"
+grep -Fq 'application.name = "Overwatch"' <<< "$merged_stream_rules"
+grep -Fq 'target.object = "easyeffects_sink"' <<< "$merged_stream_rules"
+
 for unit in "$ROOT_DIR"/systemd/*.service "$ROOT_DIR"/systemd/*.timer; do
 	sed \
 		-e 's|/usr/bin/easyeffects|/bin/true|g' \
@@ -74,6 +85,7 @@ grep -Fq 'ExecStartPre=%h/.local/bin/overwatch-audio-effects-config' "$ROOT_DIR/
 grep -Fq 'processAllOutputs' "$ROOT_DIR/bin/overwatch-audio-effects-config"
 grep -Fq 'processAllInputs' "$ROOT_DIR/bin/overwatch-audio-effects-config"
 grep -Fq 'effects_output_linked' "$ROOT_DIR/bin/overwatch-audio-session"
+grep -Fq 'creation-time routing is not active' "$ROOT_DIR/bin/overwatch-audio-session"
 grep -Fq 'unpin_effects_sink_targets' "$ROOT_DIR/install.sh"
 grep -Fq -- '-u QT_QPA_PLATFORMTHEME' "$ROOT_DIR/bin/overwatch-audio-session"
 grep -Fq 'UnsetEnvironment=DISPLAY WAYLAND_DISPLAY QT_QPA_PLATFORMTHEME GDK_BACKEND' "$ROOT_DIR/systemd/easyeffects.service"
@@ -86,6 +98,7 @@ grep -Fq 'OnUnitActiveSec=1h' "$ROOT_DIR/systemd/overwatch-audio-maintenance.tim
 grep -Fq 'overwatch-audio-maintenance.timer overwatch-audio-session.service easyeffects.service' \
 	"$ROOT_DIR/bin/overwatch-audio-session"
 grep -Fq 'systemctl --user stop overwatch-audio-maintenance.service' "$ROOT_DIR/uninstall.sh"
+grep -Fq 'systemctl --user restart pipewire-pulse.service' "$ROOT_DIR/uninstall.sh"
 
 grep -Fq 'https://github.com/basecamp/omarchy' "$ROOT_DIR/README.md"
 grep -Fq 'MIT License' "$ROOT_DIR/LICENSE"

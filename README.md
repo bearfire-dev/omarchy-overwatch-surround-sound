@@ -6,7 +6,7 @@ This setup targets Overwatch on the Logitech G PRO X Wireless headset out of the
 
 The presets apply a stereo equalizer. They do not add spatial surround processing.
 
-EasyEffects processes only the game streams that the watcher moves to it. All other audio goes directly to the selected output device.
+EasyEffects processes only the Overwatch streams that PipeWire routes to it when each stream starts. The watcher can still move compatible game streams for added profiles. All other audio goes directly to the selected output device.
 
 ## Install
 
@@ -16,7 +16,9 @@ cd omarchy-overwatch-surround-sound
 ./install.sh
 ```
 
-The installer verifies the audio prerequisites, validates the project, backs up replaced files, and enables the user services. On Omarchy, it adds missing packages with `omarchy pkg add`. On other Arch systems, it uses `sudo pacman`. On other distributions, it prints the package list and verifies the required commands. It requires the native EasyEffects at version 8.1.3 or newer for the bypass-state query. Flatpak EasyEffects is not supported. If a configured game is open, the installer defers the service restart until the game exits.
+The installer verifies the audio prerequisites, validates the project, backs up replaced files, and enables the user services. On Omarchy, it adds missing packages with `omarchy pkg add`. On other Arch systems, it uses `sudo pacman`. On other distributions, it prints the package list and verifies the required commands. It requires the native EasyEffects at version 8.1.3 or newer for the bypass-state query. Flatpak EasyEffects is not supported. If a configured game is open, the installer defers the PipeWire and audio service restart until the game exits.
+
+The PipeWire rule selects `easyeffects_sink` when Wine creates each Overwatch stream. Wine marks streams for a selected Windows endpoint as immovable. A watcher cannot repair that stream after creation, so creation-time routing is required. Close configured games before you uninstall the project.
 
 The installer includes RTKit so PipeWire can use real-time scheduling. The EasyEffects service does not use RTKit. This separation prevents the kernel real-time CPU guard from terminating EasyEffects during preset processing. It does not change the preset, sample rate, or processing quality. The service permits five start attempts within five minutes. This limit prevents an unbounded crash loop.
 

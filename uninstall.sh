@@ -14,6 +14,7 @@ managed_paths=(
 	"$HOME/.local/bin/overwatch-audio-observe"
 	"$HOME/.local/bin/overwatch-audio-maintenance"
 	"$HOME/.local/bin/overwatch-audio-effects-config"
+	"$HOME/.config/pipewire/pipewire-pulse.conf.d/overwatch-audio-routing.conf"
 	"$HOME/.config/systemd/user/easyeffects.service"
 	"$HOME/.config/systemd/user/overwatch-audio-session.service"
 	"$HOME/.config/systemd/user/overwatch-audio-maintenance.service"
@@ -21,6 +22,12 @@ managed_paths=(
 	"$HOME/.local/share/easyeffects/output/PRO X Overwatch Conservative.json"
 	"$HOME/.local/share/easyeffects/output/PRO X Neutral Reference.json"
 )
+
+if [[ -x "$HOME/.local/bin/overwatch-audio-session" ]] \
+	&& "$HOME/.local/bin/overwatch-audio-session" status 2>/dev/null | grep -Fxq 'Game: running'; then
+	printf 'Error: Close the configured game before uninstalling.\n' >&2
+	exit 1
+fi
 
 systemctl --user stop overwatch-audio-apply-update.service 2>/dev/null || true
 systemctl --user disable --now overwatch-audio-maintenance.timer 2>/dev/null || true
@@ -50,6 +57,7 @@ for destination in "${managed_paths[@]}"; do
 done
 
 systemctl --user daemon-reload
+systemctl --user restart pipewire-pulse.service
 
 original_linger=""
 original_easyeffects_enabled=""
