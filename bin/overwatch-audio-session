@@ -168,6 +168,20 @@ sink_available() {
 	pactl list sinks short | awk -v sink="$sink" '$2 == sink { found = 1 } END { exit !found }'
 }
 
+game_streams_present() {
+	pactl --format=json list sink-inputs | jq -e --arg pattern "$ACTIVE_STREAM_PATTERN" '
+		.[]
+		| select(
+			[
+				.properties["application.name"] // "",
+				.properties["application.process.binary"] // "",
+				.properties["media.name"] // ""
+			]
+			| any(test($pattern; "i"))
+		)
+	' >/dev/null
+}
+
 move_overwatch_streams() {
 	local dont_reconnect
 	local failed=false
@@ -328,6 +342,18 @@ audio_healthy() {
 	ACTIVATION_ERROR=""
 }
 
+restart_audio_services() {
+	if ! systemctl --user stop overwatch-audio-session.service easyeffects.service; then
+		systemctl --user start easyeffects.service overwatch-audio-session.service || true
+		return 1
+	fi
+	if ! systemctl --user restart pipewire-pulse.service; then
+		systemctl --user start easyeffects.service overwatch-audio-session.service || true
+		return 1
+	fi
+	systemctl --user start easyeffects.service overwatch-audio-session.service
+}
+
 apply_update_after_game() {
 	while true; do
 		while any_profile_running; do
@@ -340,9 +366,7 @@ apply_update_after_game() {
 		fi
 	done
 
-	systemctl --user restart pipewire-pulse.service
-	systemctl --user restart easyeffects.service
-	systemctl --user restart overwatch-audio-session.service
+	restart_audio_services
 	log "activated the deferred update"
 }
 
@@ -402,7 +426,20 @@ activate_audio() {
 }
 
 repair_audio() {
-	if configure_audio && audio_healthy; then
+	if ! game_streams_present; then
+		ACTIVATION_ERROR=""
+		return 0
+	fi
+
+	if ! configure_audio; then
+		if ! game_streams_present; then
+			ACTIVATION_ERROR=""
+			return 0
+		fi
+	elif ! game_streams_present; then
+		ACTIVATION_ERROR=""
+		return 0
+	elif audio_healthy; then
 		printf '%s\n' "$ACTIVE_PROFILE_NAME" > "$ACTIVE_FILE"
 		log "repaired the active Overwatch audio path"
 		observe_pipeline "pipeline_repair" "success" "The automatic repair restored the Overwatch audio path."
@@ -462,7 +499,7 @@ watch_session() {
 		&& profile_running "$matched_index"; then
 		select_profile "$matched_index"
 		session_active=1
-		if ! audio_healthy; then
+		if game_streams_present && ! audio_healthy; then
 			repair_audio || true
 		fi
 	else
@@ -479,7 +516,7 @@ watch_session() {
 				activation_backoff=0
 				next_activation=0
 			elif (( SECONDS >= next_health_check )); then
-				if ! audio_healthy; then
+				if game_streams_present && ! audio_healthy; then
 					repair_audio || true
 				fi
 				next_health_check=$((SECONDS + HEALTH_INTERVAL))
@@ -577,6 +614,9 @@ case "${1:-watch}" in
 	apply-update-after-game)
 		apply_update_after_game
 		;;
+	restart-services)
+		restart_audio_services
+		;;
 	enable)
 		enable_services
 		;;
@@ -584,7 +624,7 @@ case "${1:-watch}" in
 		rollback_services
 		;;
 	*)
-		printf 'Usage: %s {watch|on|off|status|health|enable|rollback}\n' "${0##*/}" >&2
+		printf 'Usage: %s {watch|on|off|status|health|apply-update-after-game|restart-services|enable|rollback}\n' "${0##*/}" >&2
 		exit 2
 		;;
 esac

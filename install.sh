@@ -277,9 +277,7 @@ elif "$HOME/.local/bin/overwatch-audio-session" status | grep '^Game: running$' 
 		systemctl --user start easyeffects.service overwatch-audio-session.service
 	fi
 else
-	systemctl --user restart pipewire-pulse.service
-	systemctl --user restart easyeffects.service
-	systemctl --user restart overwatch-audio-session.service
+	"$HOME/.local/bin/overwatch-audio-session" restart-services
 fi
 
 systemctl --user is-enabled --quiet easyeffects.service overwatch-audio-session.service overwatch-audio-maintenance.timer

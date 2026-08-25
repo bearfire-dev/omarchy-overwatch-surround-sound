@@ -85,6 +85,10 @@ grep -Fq 'ExecStartPre=%h/.local/bin/overwatch-audio-effects-config' "$ROOT_DIR/
 grep -Fq 'processAllOutputs' "$ROOT_DIR/bin/overwatch-audio-effects-config"
 grep -Fq 'processAllInputs' "$ROOT_DIR/bin/overwatch-audio-effects-config"
 grep -Fq 'effects_output_linked' "$ROOT_DIR/bin/overwatch-audio-session"
+grep -Fq 'game_streams_present && ! audio_healthy' "$ROOT_DIR/bin/overwatch-audio-session"
+grep -Fq 'systemctl --user stop overwatch-audio-session.service easyeffects.service' \
+	"$ROOT_DIR/bin/overwatch-audio-session"
+grep -Fq 'overwatch-audio-session" restart-services' "$ROOT_DIR/install.sh"
 grep -Fq 'creation-time routing is not active' "$ROOT_DIR/bin/overwatch-audio-session"
 grep -Fq 'unpin_effects_sink_targets' "$ROOT_DIR/install.sh"
 grep -Fq -- '-u QT_QPA_PLATFORMTHEME' "$ROOT_DIR/bin/overwatch-audio-session"
