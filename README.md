@@ -11,7 +11,7 @@ EasyEffects processes only the Overwatch streams that PipeWire routes to it when
 ## Install
 
 ```bash
-git clone https://github.com/bearfire-dev/omarchy-overwatch-surround-sound.git
+git clone https://github.com/paperkeel/omarchy-overwatch-surround-sound.git
 cd omarchy-overwatch-surround-sound
 ./install.sh
 ```
